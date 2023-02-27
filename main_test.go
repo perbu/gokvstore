@@ -6,6 +6,21 @@ import (
 	"testing"
 )
 
+func TestMain(m *testing.M) {
+	err := deleteFiles("test.db", "test.wal")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	res := m.Run()
+	err = deleteFiles("test.db", "test.wal")
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	os.Exit(res)
+}
+
 func TestEncodeDecode(t *testing.T) {
 	header1 := jEncode(OpSet, 42, 2424)
 	op, key, value, err := jDecode(header1)
@@ -33,6 +48,10 @@ func deleteFiles(files ...string) error {
 	return nil
 }
 
+// TestBasic goes through the basic operations of the KV store.
+// It creates a new KV store, sets a value, flushes the journal,
+// closes the store, reopens it, and checks that the value is
+// still there.
 func TestBasic(t *testing.T) {
 	err := deleteFiles("test.db", "test.wal")
 	if err != nil {

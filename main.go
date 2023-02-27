@@ -20,12 +20,15 @@ const (
 
 type kvMap map[string]any
 type KV struct {
-	memory    kvMap
-	fileName  string
-	journal   journal
-	mu        sync.Mutex
-	lastFlush time.Time
-	ready     atomic.Bool
+	memory        kvMap
+	fileName      string
+	journal       journal
+	mu            sync.Mutex
+	lastFlush     time.Time
+	ready         atomic.Bool
+	syncInterval  time.Duration
+	syncEvery     bool
+	autoFlushCtrl chan struct{}
 }
 
 var (
@@ -34,7 +37,10 @@ var (
 
 // New will create a new KV store. The dump file will be empty, the journal will be where all
 // the changes are stored until they are coalesced into the dump file though a call to Coalesce.
-func New(dbName, walName string) (*KV, error) {
+// Options:
+// - WithSyncInterval will set the interval between syncs.
+// - WithSyncEvery will set the sync to happen after every operation.
+func New(dbName, walName string, opts ...KvOption) (*KV, error) {
 
 	memory := make(kvMap)
 	// check if the dump file exists, if it exists the load the content into memory.
@@ -60,8 +66,36 @@ func New(dbName, walName string) (*KV, error) {
 		memory:   memory,
 		journal:  journal,
 	}
+
+	// Loop through each option
+	for _, opt := range opts {
+		// Call the option giving the instantiated
+		// *House as the argument
+		opt(kv)
+	}
+	if kv.syncInterval > 0 {
+		kv.autoFlushCtrl = make(chan struct{})
+		go kv.autoFlusher()
+	}
 	kv.ready.Store(true)
 	return kv, nil
+}
+
+func (kv *KV) autoFlusher() {
+	ticker := time.NewTicker(kv.syncInterval)
+	defer ticker.Stop()
+	// listen to the ticker and the control channel:
+	for {
+		select {
+		case <-ticker.C:
+			err := kv.Flush()
+			if err != nil {
+				log.Printf("flushing: %s", err)
+			}
+		case <-kv.autoFlushCtrl:
+			return
+		}
+	}
 }
 
 func loadFromGob(dbName string) (kvMap, error) {
@@ -141,6 +175,8 @@ func (kv *KV) Coalesce() error {
 	return nil
 }
 
+// Flush will flush the journal to disk.
+// note that it currently doesn't flush the page cache to disk.
 func (kv *KV) Flush() error {
 	if !kv.ready.Load() {
 		return ErrNotReady
@@ -185,6 +221,13 @@ func (kv *KV) Set(key string, value any) error {
 	err := kv.journal.log(OpSet, key, value)
 	if err != nil {
 		log.Printf("error persisting key '%s': %v", key, err)
+	}
+	// if syncInterval is set, flush the journal every syncInterval:
+	if (kv.syncInterval > 0 && time.Since(kv.lastFlush) > kv.syncInterval) || kv.syncEvery {
+		err := kv.Flush()
+		if err != nil {
+			log.Printf("error flushing journal: %v", err)
+		}
 	}
 	return nil
 }
